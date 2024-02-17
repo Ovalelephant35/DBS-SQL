@@ -1,15 +1,51 @@
-class ChatBot:
-    def __init__(self):
-        with open('knowledge.json', 'r') as f:
-            self.knowledge = json.load(f)
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('TelepathyGLib', '0.12')
 
-    def respond(self, message):
-        if message.lower() in self.knowledge:
-            return self.knowledge[message.lower()]
-        else:
-            return "Sorry, I don't understand."
+from gi.repository import Gtk
+from gi.repository import Gdk
+from gi.repository import GdkPixbuf
+from gi.repository import TelepathyGLib
+from gi.repository import GLib
+
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst
+
+OSK_HEIGHT = [400, 300]
+SLASH = '-x-SLASH-x-'  # slash safe encoding
+
+import logging
+import json
+import os
+import time
+import dbus
+from gettext import gettext as _
+
+from sugar3.graphics import style
+from sugar3.graphics.icon import EventIcon, Icon
+from sugar3.graphics.alert import NotifyAlert
+from sugar3.graphics.toolbarbox import ToolbarBox
+from sugar3.graphics.toolbutton import ToolButton
+from sugar3.activity import activity
+from sugar3.activity.activity import get_bundle_path
+from sugar3.presence import presenceservice
+from sugar3.activity.widgets import ActivityToolbarButton
+from sugar3.activity.widgets import StopButton
+from sugar3.activity.activity import get_activity_root
+from sugar3.activity.activity import show_object_in_journal
+from sugar3.datastore import datastore
+from sugar3 import profile
+from sugar3.graphics import iconentry
+
+from chat import smilies
+from chat.box import ChatBox
+
+logger = logging.getLogger('chat-activity')
+
+Gst.init([])
 
 class Chat(activity.Activity):
+
     def __init__(self, handle):
         pservice = presenceservice.get_instance()
         self.owner = pservice.get_owner()
@@ -35,13 +71,6 @@ class Chat(activity.Activity):
 
         toolbar_box.toolbar.insert(self._activity_toolbar_button, 0)
         self._activity_toolbar_button.show()
-
-        # Add button to chat with AI
-        self._ai_button = ToolButton.new('chat-with-ai')
-        self._ai_button.set_tooltip_text('Chat with AI')
-        self._ai_button.connect('clicked', self._ai_button_clicked_cb)
-        toolbar_box.toolbar.insert(self._ai_button, -1)
-        self._ai_button.show()
 
         self.search_entry = iconentry.IconEntry()
         self.search_entry.set_size_request(Gdk.Screen.width() / 3, -1)
@@ -75,6 +104,11 @@ class Chat(activity.Activity):
         separator.set_expand(True)
         toolbar_box.toolbar.insert(separator, -1)
 
+        # Adding "Chat with me" button
+        chat_button = Gtk.Button(label="Chat with me")
+        chat_button.connect("clicked", self._chat_with_me_clicked)
+        toolbar_box.toolbar.insert(chat_button, -1)
+
         toolbar_box.toolbar.insert(StopButton(self), -1)
         toolbar_box.show_all()
 
@@ -94,4 +128,46 @@ class Chat(activity.Activity):
                 self._joined_cb(self)
         elif handle.uri:
             # XMPP non-sugar3 incoming chat, not sharable
-            self._activity_toolbar_button.props.page.share.props
+            self._activity_toolbar_button.props.page.share.props.visible = False
+            self._one_to_one_connection(handle.uri)
+        else:
+            # we are creating the activity
+            if not self.metadata or self.metadata.get('share-scope', activity.SCOPE_PRIVATE) == activity.SCOPE_PRIVATE:
+                # if we are in private session
+                self._alert(_('Off-line'), _('Share, or invite someone.'))
+            else:
+                # resume of shared activity from journal object without invite
+                self._entry.props.placeholder_text = _('Please wait for a connection before starting to chat.')
+            self.connect('shared', self._shared_cb)
+
+    def _chat_with_me_clicked(self, button):
+        # Add your chat with me functionality here
+        pass
+
+    def _search_entry_key_press_cb(self, activity, event):
+        keyname = Gdk.keyval_name(event.keyval).lower()
+        if keyname == 'f':
+            if Gdk.ModifierType.CONTROL_MASK & event.state:
+                self.search_entry.grab_focus()
+        elif keyname == 'escape':
+            self.search_entry.props.text = ''
+            self._entry.grab_focus()
+
+    def _search_entry_on_new_message_cb(self, chatbox):
+        self._search_entry_activate_cb(self.search_entry)
+
+    def _search_entry_activate_cb(self, entry):
+        for i in range(0, self.chatbox.number_of_textboxes()):
+            textbox = self.chatbox.get_textbox(i)
+            _buffer = textbox.get_buffer()
+            start_mark = _buffer.get_mark('start')
+            end_mark = _buffer.get_mark('end')
+            if start_mark is None or end_mark is None:
+                continue
+            _buffer.delete_mark(start_mark)
+            _buffer.delete_mark(end_mark)
+            self.chatbox.highlight_text = (None, None, None)
+        self.chatbox.set_search_text(entry.props.text)
+        self._update_search_buttons()
+
+    def _update_search_buttons(self,
